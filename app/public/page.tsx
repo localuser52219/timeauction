@@ -14,13 +14,14 @@ export default function PublicPage() {
     // 訂閱所有變動
     const channel = supabase.channel('public_view')
       // [修正重點] 這裡加上 : any 來解決 TypeScript 報錯
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_rooms' }, (payload: any) => {
-         setGameState(payload.new)
-         // 狀態改變時 (如揭曉)，重新拉取 Bids 以獲得最新解密數據
-         if (payload.new && payload.new.current_round) {
-            fetchBids(payload.new.current_round) 
-         }
-      })
+// [正確] 加上 : any 讓編譯器放行
+.on('postgres_changes', { event: '*', schema: 'public', table: 'ta_rooms' }, (payload: any) => {
+   setGameState(payload.new)
+   // 為了保險，我們也檢查一下 new 是否存在
+   if (payload.new && payload.new.current_round) {
+      fetchBids(payload.new.current_round) 
+   }
+})
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_players' }, fetchPlayers)
       // 注意：在 Bidding 階段監聽 ta_bids 沒用 (因為 RLS 擋住)，但在 Revealed 階段有用
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_bids' }, () => {
