@@ -12,19 +12,20 @@ export default function PlayPage() {
   const [hasBidThisRound, setHasBidThisRound] = useState(false)
   const [isLoading, setIsLoading] = useState(true) // [新增] 載入狀態，避免畫面閃爍
 
+ // ... imports and state ...
+
   // [修改關鍵點 1] 初始化：執行匿名登入並設置監聽
   useEffect(() => {
     let roomChannel: any;
     let playerChannel: any;
 
     const initGame = async () => {
-      // 1. 匿名登入 (這是通過 RLS 的通行證)
+      // 1. 匿名登入
       const { data: authData, error } = await supabase.auth.signInAnonymously()
       
       if (error) {
         console.error('Auth failed:', error)
-        alert('無法連接伺服器，請重新整理頁面')
-        return
+        return // 這裡簡單處理，實際可加 UI 提示
       }
 
       const uid = authData.session?.user?.id
@@ -32,7 +33,7 @@ export default function PlayPage() {
 
       setPlayerId(uid)
 
-      // 2. 檢查資料庫是否已有此玩家資料 (恢復舊連線)
+      // 2. 檢查資料庫是否已有此玩家資料
       const { data: existingPlayer } = await supabase
         .from('ta_players')
         .select('*')
@@ -42,7 +43,6 @@ export default function PlayPage() {
       if (existingPlayer) {
         setMyPlayerInfo(existingPlayer)
         setPlayerName(existingPlayer.name)
-        // 檢查該玩家本局是否已出價 (避免重新整理後又能出價)
         checkIfBid(uid)
       }
 
@@ -59,28 +59,39 @@ export default function PlayPage() {
       
       // A. 監聽房間狀態 (換局)
       roomChannel = supabase.channel('room_channel')
-        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'ta_rooms' }, (payload) => {
+        // [修正重點] 這裡加上 : any
+        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'ta_rooms' }, (payload: any) => {
           setGameState(payload.new)
           // 如果換局了，重置出價狀態
-          if (payload.old.current_round !== payload.new.current_round) {
+          if (payload.old && payload.new && payload.old.current_round !== payload.new.current_round) {
             setHasBidThisRound(false)
           }
         })
         .subscribe()
       
-      // B. 監聽「我自己」的資料 (分數/時間更新)
-      // 注意：filter 設為 `id=eq.${uid}` 確保只監聽自己，減少流量
+      // B. 監聽「我自己」的資料
       playerChannel = supabase.channel(`player_${uid}`)
+        // [修正重點] 這裡加上 : any
         .on('postgres_changes', { 
           event: 'UPDATE', 
           schema: 'public', 
           table: 'ta_players', 
           filter: `id=eq.${uid}` 
-        }, (payload) => {
+        }, (payload: any) => {
           setMyPlayerInfo(payload.new)
         })
         .subscribe()
     }
+
+    initGame()
+
+    return () => {
+      if (roomChannel) supabase.removeChannel(roomChannel)
+      if (playerChannel) supabase.removeChannel(playerChannel)
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  
+  // ... rest of the file ...
 
     initGame()
 
