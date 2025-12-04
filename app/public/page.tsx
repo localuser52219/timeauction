@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { supabase } from '@/utils/supabase'
 
 export default function PublicPage() {
@@ -7,18 +7,43 @@ export default function PublicPage() {
   const [players, setPlayers] = useState<any[]>([])
   const [bids, setBids] = useState<any[]>([])
 
+  // [關鍵修正] 使用 useRef 來追蹤最新的狀態，解決閉包陷阱 (Stale Closure)
+  const gameStateRef = useRef<any>(null)
+
   useEffect(() => {
+    // 初始加載
     fetchData()
+
     const channel = supabase.channel('public_view')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_rooms' }, (payload: any) => {
-         setGameState(payload.new)
-         if (payload.new && payload.new.current_round) {
-            fetchBids(payload.new.current_round) 
+      // 1. 監聽房間狀態 (Reveal / Next Round)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'ta_rooms' }, (payload: any) => {
+         const newRoomState = payload.new
+         setGameState(newRoomState)
+         gameStateRef.current = newRoomState // 更新 Ref
+
+         // 如果狀態變為 "revealed"，強制重新拉取一次 Bids
+         if (newRoomState.game_status === 'revealed') {
+            // 延遲 500ms 確保 RLS 權限已生效
+            setTimeout(() => {
+                fetchBids(newRoomState.current_round)
+            }, 500)
+         } else {
+            // 其他狀態改變 (如進入下一局)，也更新 Bids (通常是清空)
+            fetchBids(newRoomState.current_round)
          }
       })
+      // 2. 監聽玩家分數/時間變化
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_players' }, fetchPlayers)
+      // 3. 監聽出價變化 (解決 Stale Closure)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_bids' }, () => {
-         if(gameState) fetchBids(gameState.current_round)
+         // [關鍵修正] 這裡使用 Ref 來讀取最新的 current_round
+         const currentRound = gameStateRef.current?.current_round
+         const currentStatus = gameStateRef.current?.game_status
+         
+         // 只有在已經揭曉(revealed)的狀態下，監聽出價變動才有意義 (否則 RLS 會擋住)
+         if (currentRound && currentStatus === 'revealed') {
+             fetchBids(currentRound)
+         }
       })
       .subscribe()
 
@@ -29,6 +54,7 @@ export default function PublicPage() {
     const { data: room } = await supabase.from('ta_rooms').select('*').single()
     if (room) {
       setGameState(room)
+      gameStateRef.current = room // 初始化 Ref
       fetchBids(room.current_round)
     }
     fetchPlayers()
@@ -49,7 +75,7 @@ export default function PublicPage() {
     const bid = bids.find(b => b.player_id === playerId)
     
     if (gameState.game_status === 'bidding') {
-       return <span className="text-gray-400 animate-pulse text-sm">thinking...</span>
+       return <span className="text-gray-400 animate-pulse text-sm">Thinking...</span>
     }
     
     if (bid) {
@@ -82,14 +108,13 @@ export default function PublicPage() {
         </div>
         <div className="text-right">
            <div className="text-gray-400 text-sm uppercase tracking-widest">Current Round</div>
-           {/* [修改] 顯示設定的總回合數 */}
            <div className="text-6xl font-mono font-bold text-gray-200">{gameState.current_round} <span className="text-2xl text-gray-600">/ {gameState.settings_total_rounds || 19}</span></div>
         </div>
       </div>
 
       <div className="text-center mb-8">
-         <span className={`inline-block px-10 py-3 rounded-full text-2xl font-bold tracking-[0.2em] uppercase shadow-lg
-            ${gameState.game_status === 'bidding' ? 'bg-green-600/20 text-green-400 border border-green-500/50 animate-pulse' : 'bg-red-600 text-white'}`}>
+         <span className={`inline-block px-10 py-3 rounded-full text-2xl font-bold tracking-[0.2em] uppercase shadow-lg transition-all duration-500
+            ${gameState.game_status === 'bidding' ? 'bg-green-600/20 text-green-400 border border-green-500/50 animate-pulse' : 'bg-red-600 text-white scale-110'}`}>
             {gameState.game_status}
          </span>
       </div>
@@ -116,6 +141,7 @@ export default function PublicPage() {
                  <div>{getBidDisplay(p.id)}</div>
               </div>
 
+              {/* 隱藏時間，保持盲測緊張感 */}
               <div className="text-center mt-2 opacity-20">
                  <span className="text-[10px] uppercase tracking-widest">HIDDEN</span>
               </div>
