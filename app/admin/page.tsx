@@ -75,15 +75,22 @@ export default function AdminPage() {
     setBids(data || [])
   }
 
+  // [關鍵修正 1] 回合推進邏輯
   const nextRound = async () => {
     if (!gameState) return
-    if (gameState.current_round >= (gameState.settings_total_rounds || 19)) {
+    
+    // 如果是 waiting (剛重置完)，我們應該開始第 1 局，而不是跳到第 2 局
+    const isFirstStart = gameState.game_status === 'waiting'
+    const nextRoundNum = isFirstStart ? gameState.current_round : gameState.current_round + 1
+
+    if (nextRoundNum > (gameState.settings_total_rounds || 19)) {
         alert("Game Over! Max rounds reached.")
         return
     }
+
     setBids([]) 
     await supabase.from('ta_rooms').update({
-      current_round: gameState.current_round + 1,
+      current_round: nextRoundNum,
       game_status: 'bidding'
     }).eq('id', gameState.id)
   }
@@ -91,19 +98,16 @@ export default function AdminPage() {
   const settleRound = async () => {
     if (!gameState) return
     const { data: currentBids } = await supabase.from('ta_bids').select('*').eq('round_number', gameState.current_round)
-    if (!currentBids || currentBids.length === 0) {
-      await supabase.from('ta_rooms').update({ game_status: 'revealed' }).eq('id', gameState.id)
-      return
-    }
-    // 手動結算僅更新狀態，主要依賴 DB Trigger
+    // 即使沒有出價也允許強制結算，方便測試
     await supabase.from('ta_rooms').update({ game_status: 'revealed' }).eq('id', gameState.id)
   }
   
+  // [關鍵修正 2] 完整重置邏輯 (清除幽靈玩家)
   const resetGame = async () => {
       const confirmMsg = `⚠️ DANGER: FULL RESET? \n\n設定將變更為：\n時間: ${configTime}s\n回合: ${configRounds}\n\n這將【刪除所有玩家】，請確認沒有其他人在玩！`
       if(!confirm(confirmMsg)) return
       
-      // 嘗試刪除所有玩家
+      // 嘗試刪除所有玩家 (需要 SQL RLS 支援)
       const { error } = await supabase.from('ta_players').delete().neq('id', '00000000-0000-0000-0000-000000000000')
       
       if (error) {
@@ -188,7 +192,7 @@ export default function AdminPage() {
               <div className="flex flex-col gap-3">
                  <button onClick={nextRound} disabled={gameState.game_status === 'bidding'} 
                     className="p-4 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-md transition-all">
-                    ▶ START NEXT ROUND
+                    ▶ START ROUND {gameState.game_status === 'waiting' ? 1 : gameState.current_round + 1}
                  </button>
                  <button onClick={settleRound} disabled={gameState.game_status === 'revealed'} 
                     className="p-4 bg-gray-800 text-white rounded-lg font-bold hover:bg-gray-900 disabled:opacity-50 disabled:cursor-not-allowed shadow-md transition-all text-sm">
@@ -222,7 +226,6 @@ export default function AdminPage() {
                   {players.map(p => {
                     const bid = bids.find(b => b.player_id === p.id && b.round_number === gameState.current_round)
                     
-                    // [優化] 狀態顯示邏輯
                     let statusBadge;
                     if (bid) {
                         if (bid.is_fold) {
