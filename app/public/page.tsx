@@ -7,88 +7,42 @@ export default function PublicPage() {
   const [players, setPlayers] = useState<any[]>([])
   const [bids, setBids] = useState<any[]>([])
 
-  // [關鍵修正] 使用 Ref 來追蹤最新的狀態，解決閉包陷阱
+  // 使用 Ref 來避免閉包問題
   const gameStateRef = useRef<any>(null)
-  // 自動檢查的計時器
-  const pollingTimerRef = useRef<NodeJS.Timeout | null>(null)
 
   useEffect(() => {
-    // 1. 初始加載
     fetchData()
 
-    // 2. Realtime 監聽 (負責畫面更新)
     const channel = supabase.channel('public_view')
+      // 1. 監聽房間狀態 (最重要)
+      // 當 DB 觸發器將狀態改為 'revealed' 時，這裡會立刻收到通知
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'ta_rooms' }, (payload: any) => {
          const newRoom = payload.new
          setGameState(newRoom)
-         gameStateRef.current = newRoom // 更新 Ref
-         
+         gameStateRef.current = newRoom 
+
          if (newRoom.game_status === 'revealed') {
-            // 揭曉時稍微延遲，確保權限已生效
+            // 收到揭曉訊號，拉取結果
+            // 小技巧：延遲 500ms 讓資料庫事務完全提交，確保 RLS 權限已釋放
             setTimeout(() => fetchBids(newRoom.current_round), 500)
-         } else {
-            // 新回合開始，清空 bids
+         } else if (newRoom.game_status === 'bidding') {
+            // 進入下一局，清空舊出價
             setBids([]) 
          }
       })
+      // 2. 監聽玩家分數/時間變化
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_players' }, fetchPlayers)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_bids' }, () => {
-         // [關鍵修正] 使用 Ref 讀取最新狀態
-         const currentRound = gameStateRef.current?.current_round
-         const currentStatus = gameStateRef.current?.game_status
-         
-         // 只有在已經揭曉(revealed)的狀態下，監聽出價變動才有意義
-         if (currentRound && currentStatus === 'revealed') {
-             fetchBids(currentRound)
-         }
-      })
       .subscribe()
 
-    // 3. 自動化檢查 (Polling) - 每 3 秒檢查一次是否所有人都出價
-    pollingTimerRef.current = setInterval(checkAndTriggerSettle, 3000)
-
-    return () => { 
-      supabase.removeChannel(channel)
-      if (pollingTimerRef.current) clearInterval(pollingTimerRef.current)
-    }
+    return () => { supabase.removeChannel(channel) }
   }, [])
-
-  // [核心功能] 檢查並觸發結算
-  const checkAndTriggerSettle = async () => {
-    const current = gameStateRef.current
-    // 只有在「競價中 (bidding)」才需要檢查
-    if (!current || current.game_status !== 'bidding') return
-
-    try {
-      // 呼叫 DB 函數查詢進度 (確保你在 SQL 中已建立此函數)
-      const { data, error } = await supabase.rpc('get_round_progress', { p_round: current.current_round })
-      
-      if (error) {
-        // 如果報錯，通常是因為 SQL 函數沒建立，或是 RLS 問題
-        // console.error("Check failed (RPC missing?):", error) 
-        return
-      }
-
-      const { player_count, bid_count } = data as any
-      
-      // 如果 所有人都出價了 (且至少有 1 人)
-      if (player_count > 0 && bid_count >= player_count) {
-         console.log(`All ${player_count} players submitted. Triggering Settle...`)
-         
-         // 呼叫 DB 函數執行結算
-         await supabase.rpc('settle_round_db', { p_round: current.current_round })
-      }
-    } catch (err) {
-      console.error("Auto-check error:", err)
-    }
-  }
 
   const fetchData = async () => {
     const { data: room } = await supabase.from('ta_rooms').select('*').single()
     if (room) {
       setGameState(room)
-      gameStateRef.current = room // 初始化 Ref
-      fetchBids(room.current_round)
+      gameStateRef.current = room
+      if(room.game_status === 'revealed') fetchBids(room.current_round)
     }
     fetchPlayers()
   }
@@ -193,11 +147,9 @@ export default function PublicPage() {
               <div className="bg-black/40 rounded-xl p-5 text-center border border-white/5 relative overflow-hidden">
                  <div className="text-[9px] text-gray-600 uppercase mb-2 tracking-[0.2em]">Bid Submitted</div>
                  <div className="relative z-10">{getBidDisplay(p.id)}</div>
-                 {/* 裝飾背景 */}
                  <div className="absolute inset-0 bg-gradient-to-b from-transparent to-white/5 opacity-0 group-hover:opacity-100 transition"></div>
               </div>
 
-              {/* 隱藏時間指示 */}
               <div className="mt-4 flex justify-center items-center gap-2 opacity-30">
                  <div className="w-1.5 h-1.5 rounded-full bg-gray-500"></div>
                  <span className="text-[9px] uppercase tracking-widest text-gray-500">Time Hidden</span>
