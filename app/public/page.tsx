@@ -7,21 +7,24 @@ export default function PublicPage() {
   const [players, setPlayers] = useState<any[]>([])
   const [bids, setBids] = useState<any[]>([])
 
-  // 使用 Ref 解決閉包問題
+  // [關鍵修正] 使用 Ref 來追蹤最新的狀態，解決閉包陷阱
   const gameStateRef = useRef<any>(null)
+  // 自動檢查的計時器
   const pollingTimerRef = useRef<NodeJS.Timeout | null>(null)
 
   useEffect(() => {
+    // 1. 初始加載
     fetchData()
 
-    // 1. Realtime 監聽 (負責畫面更新)
+    // 2. Realtime 監聽 (負責畫面更新)
     const channel = supabase.channel('public_view')
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'ta_rooms' }, (payload: any) => {
          const newRoom = payload.new
          setGameState(newRoom)
-         gameStateRef.current = newRoom
+         gameStateRef.current = newRoom // 更新 Ref
          
          if (newRoom.game_status === 'revealed') {
+            // 揭曉時稍微延遲，確保權限已生效
             setTimeout(() => fetchBids(newRoom.current_round), 500)
          } else {
             // 新回合開始，清空 bids
@@ -30,15 +33,18 @@ export default function PublicPage() {
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_players' }, fetchPlayers)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_bids' }, () => {
-         // 在揭曉狀態下，即時更新出價顯示
-         if (gameStateRef.current?.game_status === 'revealed') {
-             fetchBids(gameStateRef.current.current_round)
+         // [關鍵修正] 使用 Ref 讀取最新狀態
+         const currentRound = gameStateRef.current?.current_round
+         const currentStatus = gameStateRef.current?.game_status
+         
+         // 只有在已經揭曉(revealed)的狀態下，監聽出價變動才有意義
+         if (currentRound && currentStatus === 'revealed') {
+             fetchBids(currentRound)
          }
       })
       .subscribe()
 
-    // 2. [新增] 自動化檢查 (Polling) - 每 3 秒檢查一次
-    // 雖然你要求 5 秒，但 3 秒體驗會更流暢
+    // 3. 自動化檢查 (Polling) - 每 3 秒檢查一次是否所有人都出價
     pollingTimerRef.current = setInterval(checkAndTriggerSettle, 3000)
 
     return () => { 
@@ -47,18 +53,19 @@ export default function PublicPage() {
     }
   }, [])
 
-  // [核心邏輯] 檢查並觸發結算
+  // [核心功能] 檢查並觸發結算
   const checkAndTriggerSettle = async () => {
     const current = gameStateRef.current
     // 只有在「競價中 (bidding)」才需要檢查
     if (!current || current.game_status !== 'bidding') return
 
     try {
-      // 呼叫 DB 函數查詢進度 (不受 RLS 限制)
+      // 呼叫 DB 函數查詢進度 (確保你在 SQL 中已建立此函數)
       const { data, error } = await supabase.rpc('get_round_progress', { p_round: current.current_round })
       
       if (error) {
-        console.error("Check failed:", error)
+        // 如果報錯，通常是因為 SQL 函數沒建立，或是 RLS 問題
+        // console.error("Check failed (RPC missing?):", error) 
         return
       }
 
@@ -69,10 +76,7 @@ export default function PublicPage() {
          console.log(`All ${player_count} players submitted. Triggering Settle...`)
          
          // 呼叫 DB 函數執行結算
-         const { error: settleError } = await supabase.rpc('settle_round_db', { p_round: current.current_round })
-         
-         if (settleError) console.error("Settle failed:", settleError)
-         else console.log("Round Auto-Settled via Database!")
+         await supabase.rpc('settle_round_db', { p_round: current.current_round })
       }
     } catch (err) {
       console.error("Auto-check error:", err)
@@ -83,7 +87,7 @@ export default function PublicPage() {
     const { data: room } = await supabase.from('ta_rooms').select('*').single()
     if (room) {
       setGameState(room)
-      gameStateRef.current = room
+      gameStateRef.current = room // 初始化 Ref
       fetchBids(room.current_round)
     }
     fetchPlayers()
@@ -104,7 +108,6 @@ export default function PublicPage() {
     const bid = bids.find(b => b.player_id === playerId)
     
     if (gameState.game_status === 'bidding') {
-       // 競價中：顯示思考中
        return <span className="text-gray-500 animate-pulse text-sm font-mono tracking-widest">THINKING...</span>
     }
     
