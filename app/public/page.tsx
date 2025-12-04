@@ -8,22 +8,15 @@ export default function PublicPage() {
   const [bids, setBids] = useState<any[]>([])
 
   useEffect(() => {
-    // 初始加載
     fetchData()
-
-    // 訂閱所有變動
     const channel = supabase.channel('public_view')
-      // [修正重點] 這裡加上 : any 來解決 TypeScript 報錯
-// [正確] 加上 : any 讓編譯器放行
-.on('postgres_changes', { event: '*', schema: 'public', table: 'ta_rooms' }, (payload: any) => {
-   setGameState(payload.new)
-   // 為了保險，我們也檢查一下 new 是否存在
-   if (payload.new && payload.new.current_round) {
-      fetchBids(payload.new.current_round) 
-   }
-})
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_rooms' }, (payload: any) => {
+         setGameState(payload.new)
+         if (payload.new && payload.new.current_round) {
+            fetchBids(payload.new.current_round) 
+         }
+      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_players' }, fetchPlayers)
-      // 注意：在 Bidding 階段監聽 ta_bids 沒用 (因為 RLS 擋住)，但在 Revealed 階段有用
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_bids' }, () => {
          if(gameState) fetchBids(gameState.current_round)
       })
@@ -51,41 +44,36 @@ export default function PublicPage() {
     setBids(data || [])
   }
 
-  // 輔助顯示
   const getBidDisplay = (playerId: string) => {
     if (!gameState) return '-'
     const bid = bids.find(b => b.player_id === playerId)
     
-    // 競價階段
     if (gameState.game_status === 'bidding') {
-       return <span className="text-gray-400 animate-pulse">???</span>
+       return <span className="text-gray-400 animate-pulse text-sm">thinking...</span>
     }
     
-    // 揭曉階段
     if (bid) {
        if (bid.is_fold) return <span className="text-gray-400 text-sm">FOLD</span>
-       return <span className="text-blue-600 text-3xl font-bold font-mono">{bid.bid_seconds.toFixed(2)}s</span>
+       return <span className="text-blue-500 text-3xl font-bold font-mono">{bid.bid_seconds.toFixed(2)}s</span>
     }
     return <span className="text-red-300 text-sm">NO BID</span>
   }
 
-  // 計算最高分高亮 (僅在揭曉時)
   const getWinnerId = () => {
      if(gameState?.game_status !== 'revealed' || bids.length === 0) return null
      const validBids = bids.filter(b => !b.is_fold)
      if(validBids.length === 0) return null
      const max = Math.max(...validBids.map(b => b.bid_seconds))
      const winners = validBids.filter(b => b.bid_seconds === max)
-     return winners.length === 1 ? winners[0].player_id : null // Tie = no winner
+     return winners.length === 1 ? winners[0].player_id : null
   }
   
   const winnerId = getWinnerId()
 
-  if (!gameState) return <div className="p-10 text-xl">Loading Arena...</div>
+  if (!gameState) return <div className="p-10 text-xl text-white">Loading Arena...</div>
 
   return (
-    <div className="min-h-screen bg-slate-900 text-white p-8 overflow-hidden">
-      {/* 頂部 Header */}
+    <div className="min-h-screen bg-neutral-900 text-white p-8 overflow-hidden font-sans">
       <div className="flex justify-between items-end mb-10 border-b border-gray-700 pb-4">
         <div>
            <h1 className="text-5xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-red-600 uppercase italic">
@@ -94,46 +82,42 @@ export default function PublicPage() {
         </div>
         <div className="text-right">
            <div className="text-gray-400 text-sm uppercase tracking-widest">Current Round</div>
-           <div className="text-6xl font-mono font-bold">{gameState.current_round} <span className="text-2xl text-gray-500">/ 19</span></div>
+           <div className="text-6xl font-mono font-bold text-gray-200">{gameState.current_round} <span className="text-2xl text-gray-600">/ 19</span></div>
         </div>
       </div>
 
-      {/* 狀態大標題 */}
       <div className="text-center mb-8">
-         <span className={`inline-block px-8 py-2 rounded-full text-2xl font-bold tracking-widest uppercase
-            ${gameState.game_status === 'bidding' ? 'bg-green-600 animate-pulse' : 'bg-red-600'}`}>
+         <span className={`inline-block px-10 py-3 rounded-full text-2xl font-bold tracking-[0.2em] uppercase shadow-lg
+            ${gameState.game_status === 'bidding' ? 'bg-green-600/20 text-green-400 border border-green-500/50 animate-pulse' : 'bg-red-600 text-white'}`}>
             {gameState.game_status}
          </span>
       </div>
 
-      {/* 玩家列表 Grid */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
         {players.map(p => {
           const isWinner = p.id === winnerId
           return (
             <div key={p.id} 
                  className={`relative bg-gray-800 rounded-xl p-6 border-2 transition-all duration-500
-                 ${isWinner ? 'border-yellow-400 scale-105 shadow-[0_0_30px_rgba(250,204,21,0.5)] z-10' : 'border-gray-700 opacity-90'}
+                 ${isWinner ? 'border-yellow-400 scale-105 shadow-[0_0_30px_rgba(250,204,21,0.5)] z-10 bg-gray-800' : 'border-gray-700/50 opacity-90'}
                  `}>
-              {isWinner && <div className="absolute -top-4 -right-4 text-4xl">👑</div>}
+              {isWinner && <div className="absolute -top-4 -right-4 text-4xl animate-bounce">👑</div>}
               
               <div className="flex justify-between items-start mb-4">
-                 <h2 className="text-2xl font-bold truncate">{p.name}</h2>
+                 <h2 className="text-2xl font-bold truncate max-w-[70%]">{p.name}</h2>
                  <div className="text-yellow-400 font-bold text-xl flex">
-                   {p.tokens}<span className="text-xs mt-1 ml-1">★</span>
+                   {p.tokens}<span className="text-xs mt-1 ml-1 text-yellow-600">★</span>
                  </div>
               </div>
 
-              <div className="bg-gray-900 rounded-lg p-4 text-center mb-2">
-                 <div className="text-xs text-gray-500 uppercase mb-1">Bid Time</div>
+              <div className="bg-gray-900/50 rounded-lg p-4 text-center mb-2 border border-white/5">
+                 <div className="text-[10px] text-gray-500 uppercase mb-1 tracking-wider">Bid Time</div>
                  <div>{getBidDisplay(p.id)}</div>
               </div>
 
-              <div className="text-right">
-                 <span className="text-xs text-gray-500 mr-2">REMAINING:</span>
-                 <span className={`font-mono text-xl ${p.total_time_left < 30 ? 'text-red-500' : 'text-gray-300'}`}>
-                   {p.total_time_left.toFixed(1)}s
-                 </span>
+              {/* [修改功能] 剩餘時間已被隱藏 (Commented Out) */}
+              <div className="text-center mt-2 opacity-20">
+                 <span className="text-[10px] uppercase tracking-widest">HIDDEN</span>
               </div>
             </div>
           )
