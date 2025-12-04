@@ -1,9 +1,9 @@
 import type { Metadata } from 'next'
-import './globals.css' // 匯入全域樣式 (Tailwind)
+import './globals.css' // <--- 絕對不能漏掉這一行！
 
 export const metadata: Metadata = {
   title: 'Time Auction',
-  description: 'Time Auction Game App',
+  description: 'Survival Game',
 }
 
 export default function RootLayout({
