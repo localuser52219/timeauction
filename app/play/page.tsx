@@ -4,7 +4,6 @@ import { supabase } from '@/utils/supabase'
 import GameButton from '@/app/components/GameButton'
 
 export default function PlayPage() {
-  // 狀態管理
   const [playerId, setPlayerId] = useState<string | null>(null)
   const [playerName, setPlayerName] = useState('')
   const [gameState, setGameState] = useState<any>(null)
@@ -12,13 +11,11 @@ export default function PlayPage() {
   const [hasBidThisRound, setHasBidThisRound] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
 
-  // 初始化：執行匿名登入並設置監聽
   useEffect(() => {
     let roomChannel: any;
     let playerChannel: any;
 
     const initGame = async () => {
-      // 1. 匿名登入 (這是通過 RLS 的通行證)
       const { data: authData, error } = await supabase.auth.signInAnonymously()
       
       if (error) {
@@ -32,7 +29,6 @@ export default function PlayPage() {
 
       setPlayerId(uid)
 
-      // 2. 檢查資料庫是否已有此玩家資料 (恢復舊連線)
       const { data: existingPlayer } = await supabase
         .from('ta_players')
         .select('*')
@@ -42,11 +38,9 @@ export default function PlayPage() {
       if (existingPlayer) {
         setMyPlayerInfo(existingPlayer)
         setPlayerName(existingPlayer.name)
-        // 檢查該玩家本局是否已出價
         checkIfBid(uid)
       }
 
-      // 3. 獲取當前房間狀態
       const { data: roomData } = await supabase.from('ta_rooms').select('*').single()
       if (roomData) {
         setGameState(roomData)
@@ -55,23 +49,16 @@ export default function PlayPage() {
 
       setIsLoading(false)
 
-      // 4. 設定即時監聽 (Realtime)
-      
-      // A. 監聽房間狀態 (換局)
       roomChannel = supabase.channel('room_channel')
-        // [關鍵修正] 加上 : any 避免 TypeScript 報錯
         .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'ta_rooms' }, (payload: any) => {
           setGameState(payload.new)
-          // 如果換局了，重置出價狀態 (加上 ?. 防止 undefined)
           if (payload.old?.current_round !== payload.new?.current_round) {
             setHasBidThisRound(false)
           }
         })
         .subscribe()
       
-      // B. 監聽「我自己」的資料 (分數/時間更新)
       playerChannel = supabase.channel(`player_${uid}`)
-        // [關鍵修正] 加上 : any 避免 TypeScript 報錯
         .on('postgres_changes', { 
           event: 'UPDATE', 
           schema: 'public', 
@@ -85,14 +72,12 @@ export default function PlayPage() {
 
     initGame()
 
-    // Cleanup: 離開頁面時取消訂閱
     return () => {
       if (roomChannel) supabase.removeChannel(roomChannel)
       if (playerChannel) supabase.removeChannel(playerChannel)
     }
   }, [])
 
-  // 輔助函式：檢查本局是否已出過價
   const checkIfBid = async (uid: string, round?: number) => {
     const currentR = round || gameState?.current_round
     if(!currentR) return
@@ -107,14 +92,20 @@ export default function PlayPage() {
     if (data) setHasBidThisRound(true)
   }
 
-  // 加入遊戲
   const handleJoin = async () => {
     if (!playerName || !playerId) return
     
-    // 明確指定 id 為 auth.uid (playerId) 以通過 RLS
+    // [修改] 加入時讀取房間設定的初始時間
+    let initialTime = 600.0
+    if (gameState && gameState.settings_initial_time) {
+        initialTime = gameState.settings_initial_time
+    }
+
+    // 寫入資料庫時，明確指定 total_time_left
     const { data, error } = await supabase.from('ta_players').upsert({ 
       id: playerId, 
-      name: playerName 
+      name: playerName,
+      total_time_left: initialTime // <--- 關鍵修改
     }).select().single()
 
     if (error) {
@@ -125,8 +116,6 @@ export default function PlayPage() {
     }
   }
 
-  // --- Render 介面部分 ---
-
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-screen bg-gray-50">
@@ -135,7 +124,6 @@ export default function PlayPage() {
     )
   }
 
-  // 如果還沒加入 (資料庫無此人)，顯示登入畫面
   if (!myPlayerInfo) {
     return (
       <div className="flex flex-col items-center justify-center h-screen bg-gray-50 p-4">
@@ -159,7 +147,6 @@ export default function PlayPage() {
 
   return (
     <div className="flex flex-col h-screen bg-white">
-      {/* 頂部狀態欄 */}
       <div className="flex justify-between p-4 bg-gray-900 text-white shadow-md">
         <div>
           <div className="text-xs text-gray-400">Player</div>
@@ -173,25 +160,23 @@ export default function PlayPage() {
         </div>
       </div>
 
-      {/* 主要遊戲區 */}
       <div className="flex-1 flex flex-col items-center justify-center p-4 relative">
-        {/* 背景大字 */}
         <div className="absolute inset-0 flex items-center justify-center opacity-5 pointer-events-none">
            <span className="text-[200px] font-bold text-black">{gameState?.current_round}</span>
         </div>
 
         <div className="mb-8 text-center z-10">
-          <h2 className="text-3xl font-bold text-gray-800">Round {gameState?.current_round || 1} / 19</h2>
+          {/* [修改] 顯示正確的總回合數 */}
+          <h2 className="text-3xl font-bold text-gray-800">Round {gameState?.current_round || 1} / {gameState?.settings_total_rounds || 19}</h2>
           <div className={`text-sm font-bold uppercase tracking-widest px-3 py-1 rounded-full inline-block mt-2
             ${gameState?.game_status === 'bidding' ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-600'}`}>
             {gameState?.game_status === 'bidding' ? 'BIDDING OPEN' : gameState?.game_status}
           </div>
         </div>
 
-        {/* 核心邏輯：根據狀態顯示按鈕 */}
         {gameState?.game_status === 'bidding' && !hasBidThisRound ? (
           <GameButton 
-            playerId={playerId!} // 這裡確定有 ID
+            playerId={playerId!} 
             roundNumber={gameState.current_round}
             onSubmitted={() => setHasBidThisRound(true)}
           />
@@ -213,7 +198,6 @@ export default function PlayPage() {
         )}
       </div>
       
-      {/* 底部 Tokens 顯示 */}
       <div className="p-4 bg-gray-50 border-t border-gray-200">
          <div className="flex justify-center items-center gap-2 flex-wrap">
            <span className="text-gray-500 font-bold mr-2 text-sm">TOKENS:</span>
