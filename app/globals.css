@@ -2,8 +2,8 @@
 @tailwind components;
 @tailwind utilities;
 
-/* 確保背景色能延伸到全螢幕 */
+/* 下面是你原本的背景設定 */
 body {
-  background-color: #171717; /* neutral-900 */
+  background-color: #171717;
   color: white;
 }
