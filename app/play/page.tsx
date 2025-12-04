@@ -58,29 +58,28 @@ export default function PlayPage() {
       // 4. 設定即時監聽 (Realtime)
       
       // A. 監聽房間狀態 (換局)
-      roomChannel = supabase.channel('room_channel')
-        // [修正重點] 這裡加上 : any
-        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'ta_rooms' }, (payload: any) => {
-          setGameState(payload.new)
-          // 如果換局了，重置出價狀態
-          if (payload.old && payload.new && payload.old.current_round !== payload.new.current_round) {
-            setHasBidThisRound(false)
-          }
-        })
-        .subscribe()
+      // [正確]
+roomChannel = supabase.channel('room_channel')
+  .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'ta_rooms' }, (payload: any) => {
+    setGameState(payload.new)
+    // 加上安全性檢查 (?.) 避免 payload.old 為空時報錯
+    if (payload.old?.current_round !== payload.new?.current_round) {
+      setHasBidThisRound(false)
+    }
+  })
+  .subscribe()
       
       // B. 監聽「我自己」的資料
-      playerChannel = supabase.channel(`player_${uid}`)
-        // [修正重點] 這裡加上 : any
-        .on('postgres_changes', { 
-          event: 'UPDATE', 
-          schema: 'public', 
-          table: 'ta_players', 
-          filter: `id=eq.${uid}` 
-        }, (payload: any) => {
-          setMyPlayerInfo(payload.new)
-        })
-        .subscribe()
+playerChannel = supabase.channel(`player_${uid}`)
+  .on('postgres_changes', { 
+    event: 'UPDATE', 
+    schema: 'public', 
+    table: 'ta_players', 
+    filter: `id=eq.${uid}` 
+  }, (payload: any) => { // [正確] 加上 : any
+    setMyPlayerInfo(payload.new)
+  })
+  .subscribe()
     }
 
     initGame()
