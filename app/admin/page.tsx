@@ -27,18 +27,6 @@ export default function AdminPage() {
     })
   }, [])
 
-  // 自動結算監聽器
-  useEffect(() => {
-    if (!gameState || gameState.game_status !== 'bidding' || players.length === 0) return
-
-    const currentRoundBids = bids.filter(b => b.round_number === gameState.current_round)
-    
-    if (currentRoundBids.length === players.length && !isSettlingRef.current) {
-        console.log("All players have bid. Auto settling...")
-        settleRound()
-    }
-  }, [bids, players, gameState])
-
   // 當從 DB 載入房間設定時，同步更新 UI 選項
   useEffect(() => {
     if (gameState) {
