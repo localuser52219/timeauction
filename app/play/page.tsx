@@ -10,22 +10,21 @@ export default function PlayPage() {
   const [gameState, setGameState] = useState<any>(null)
   const [myPlayerInfo, setMyPlayerInfo] = useState<any>(null)
   const [hasBidThisRound, setHasBidThisRound] = useState(false)
-  const [isLoading, setIsLoading] = useState(true) // [新增] 載入狀態，避免畫面閃爍
+  const [isLoading, setIsLoading] = useState(true)
 
- // ... imports and state ...
-
-  // [修改關鍵點 1] 初始化：執行匿名登入並設置監聽
+  // 初始化：執行匿名登入並設置監聽
   useEffect(() => {
     let roomChannel: any;
     let playerChannel: any;
 
     const initGame = async () => {
-      // 1. 匿名登入
+      // 1. 匿名登入 (這是通過 RLS 的通行證)
       const { data: authData, error } = await supabase.auth.signInAnonymously()
       
       if (error) {
         console.error('Auth failed:', error)
-        return // 這裡簡單處理，實際可加 UI 提示
+        alert('無法連接伺服器，請重新整理頁面')
+        return
       }
 
       const uid = authData.session?.user?.id
@@ -33,7 +32,7 @@ export default function PlayPage() {
 
       setPlayerId(uid)
 
-      // 2. 檢查資料庫是否已有此玩家資料
+      // 2. 檢查資料庫是否已有此玩家資料 (恢復舊連線)
       const { data: existingPlayer } = await supabase
         .from('ta_players')
         .select('*')
@@ -43,6 +42,7 @@ export default function PlayPage() {
       if (existingPlayer) {
         setMyPlayerInfo(existingPlayer)
         setPlayerName(existingPlayer.name)
+        // 檢查該玩家本局是否已出價
         checkIfBid(uid)
       }
 
@@ -58,39 +58,30 @@ export default function PlayPage() {
       // 4. 設定即時監聽 (Realtime)
       
       // A. 監聽房間狀態 (換局)
-      // [正確]
-roomChannel = supabase.channel('room_channel')
-  .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'ta_rooms' }, (payload: any) => {
-    setGameState(payload.new)
-    // 加上安全性檢查 (?.) 避免 payload.old 為空時報錯
-    if (payload.old?.current_round !== payload.new?.current_round) {
-      setHasBidThisRound(false)
-    }
-  })
-  .subscribe()
+      roomChannel = supabase.channel('room_channel')
+        // [關鍵修正] 加上 : any 避免 TypeScript 報錯
+        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'ta_rooms' }, (payload: any) => {
+          setGameState(payload.new)
+          // 如果換局了，重置出價狀態 (加上 ?. 防止 undefined)
+          if (payload.old?.current_round !== payload.new?.current_round) {
+            setHasBidThisRound(false)
+          }
+        })
+        .subscribe()
       
-      // B. 監聽「我自己」的資料
-playerChannel = supabase.channel(`player_${uid}`)
-  .on('postgres_changes', { 
-    event: 'UPDATE', 
-    schema: 'public', 
-    table: 'ta_players', 
-    filter: `id=eq.${uid}` 
-  }, (payload: any) => { // [正確] 加上 : any
-    setMyPlayerInfo(payload.new)
-  })
-  .subscribe()
+      // B. 監聽「我自己」的資料 (分數/時間更新)
+      playerChannel = supabase.channel(`player_${uid}`)
+        // [關鍵修正] 加上 : any 避免 TypeScript 報錯
+        .on('postgres_changes', { 
+          event: 'UPDATE', 
+          schema: 'public', 
+          table: 'ta_players', 
+          filter: `id=eq.${uid}` 
+        }, (payload: any) => {
+          setMyPlayerInfo(payload.new)
+        })
+        .subscribe()
     }
-
-    initGame()
-
-    return () => {
-      if (roomChannel) supabase.removeChannel(roomChannel)
-      if (playerChannel) supabase.removeChannel(playerChannel)
-    }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
-  
-  // ... rest of the file ...
 
     initGame()
 
@@ -103,7 +94,6 @@ playerChannel = supabase.channel(`player_${uid}`)
 
   // 輔助函式：檢查本局是否已出過價
   const checkIfBid = async (uid: string, round?: number) => {
-    // 如果沒傳 round，就用 state 裡的，再沒有就用 1
     const currentR = round || gameState?.current_round
     if(!currentR) return
 
@@ -112,17 +102,16 @@ playerChannel = supabase.channel(`player_${uid}`)
       .select('id')
       .eq('player_id', uid)
       .eq('round_number', currentR)
-      .single() // 如果有找到任何一筆，代表已出價
+      .single() 
     
     if (data) setHasBidThisRound(true)
   }
 
-  // [修改關鍵點 2] 加入遊戲
+  // 加入遊戲
   const handleJoin = async () => {
     if (!playerName || !playerId) return
     
-    // 這裡我們明確指定 id 為 auth.uid (playerId)
-    // 這樣才能通過 RLS Policy: "auth.uid() = id"
+    // 明確指定 id 為 auth.uid (playerId) 以通過 RLS
     const { data, error } = await supabase.from('ta_players').upsert({ 
       id: playerId, 
       name: playerName 
