@@ -23,7 +23,7 @@ export default function PublicPage() {
       .subscribe()
 
     return () => { supabase.removeChannel(channel) }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [])
 
   const fetchData = async () => {
     const { data: room } = await supabase.from('ta_rooms').select('*').single()
@@ -82,7 +82,8 @@ export default function PublicPage() {
         </div>
         <div className="text-right">
            <div className="text-gray-400 text-sm uppercase tracking-widest">Current Round</div>
-           <div className="text-6xl font-mono font-bold text-gray-200">{gameState.current_round} <span className="text-2xl text-gray-600">/ 19</span></div>
+           {/* [修改] 顯示設定的總回合數 */}
+           <div className="text-6xl font-mono font-bold text-gray-200">{gameState.current_round} <span className="text-2xl text-gray-600">/ {gameState.settings_total_rounds || 19}</span></div>
         </div>
       </div>
 
@@ -115,7 +116,6 @@ export default function PublicPage() {
                  <div>{getBidDisplay(p.id)}</div>
               </div>
 
-              {/* [修改功能] 剩餘時間已被隱藏 (Commented Out) */}
               <div className="text-center mt-2 opacity-20">
                  <span className="text-[10px] uppercase tracking-widest">HIDDEN</span>
               </div>
