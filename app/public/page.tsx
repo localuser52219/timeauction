@@ -13,10 +13,13 @@ export default function PublicPage() {
 
     // 訂閱所有變動
     const channel = supabase.channel('public_view')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_rooms' }, (payload) => {
+      // [修正重點] 這裡加上 : any 來解決 TypeScript 報錯
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_rooms' }, (payload: any) => {
          setGameState(payload.new)
          // 狀態改變時 (如揭曉)，重新拉取 Bids 以獲得最新解密數據
-         fetchBids(payload.new.current_round) 
+         if (payload.new && payload.new.current_round) {
+            fetchBids(payload.new.current_round) 
+         }
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_players' }, fetchPlayers)
       // 注意：在 Bidding 階段監聽 ta_bids 沒用 (因為 RLS 擋住)，但在 Revealed 階段有用
@@ -26,7 +29,7 @@ export default function PublicPage() {
       .subscribe()
 
     return () => { supabase.removeChannel(channel) }
-  }, [])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchData = async () => {
     const { data: room } = await supabase.from('ta_rooms').select('*').single()
@@ -54,8 +57,6 @@ export default function PublicPage() {
     
     // 競價階段
     if (gameState.game_status === 'bidding') {
-       // 這裡我們其實無法知道誰已經出價 (因為 RLS 擋住了)，除非我們在 DB 加一個 public 欄位 'has_bid'
-       // 目前設計：只能顯示 ?
        return <span className="text-gray-400 animate-pulse">???</span>
     }
     
