@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { supabase } from '@/utils/supabase'
 
 export default function AdminPage() {
@@ -13,13 +13,30 @@ export default function AdminPage() {
   const [bids, setBids] = useState<any[]>([])
   const [gameState, setGameState] = useState<any>(null)
 
+  // 防止重複結算的鎖
+  const isSettlingRef = useRef(false)
+
   useEffect(() => {
-    // 檢查是否已登入
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
       if (session) initDashboard()
     })
   }, [])
+
+  // [新增功能] 自動結算監聽器
+  // 當 Bids 變動或 Players 變動時，檢查是否所有人已出價
+  useEffect(() => {
+    if (!gameState || gameState.game_status !== 'bidding' || players.length === 0) return
+
+    // 找出本局的有效出價 (包含 Fold 的)
+    const currentRoundBids = bids.filter(b => b.round_number === gameState.current_round)
+    
+    // 如果「出價數」等於「玩家總數」，且目前沒有正在結算
+    if (currentRoundBids.length === players.length && !isSettlingRef.current) {
+        console.log("All players have bid. Auto settling...")
+        settleRound()
+    }
+  }, [bids, players, gameState]) // 監聽這些變數
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -33,7 +50,6 @@ export default function AdminPage() {
     setLoading(false)
   }
 
-  // --- Dashboard 邏輯 (與之前類似，但加上了即時監聽) ---
   const initDashboard = () => {
     fetchData()
     subscribeRealtime()
@@ -60,17 +76,14 @@ export default function AdminPage() {
   }
   
   const fetchBids = async () => {
-    // Admin 權限可以讀取所有 bids (因為 Step 3 的 RLS 設定)
     if(!gameState) return
     const { data } = await supabase.from('ta_bids').select('*')
-    // 這裡我們只取當前局或上一局的數據，視需求過濾
     setBids(data || [])
   }
 
-  // --- 遊戲控制 ---
   const nextRound = async () => {
     if (!gameState) return
-    // 清空當前出價顯示 (UI層面)
+    isSettlingRef.current = false // 解鎖
     setBids([]) 
     await supabase.from('ta_rooms').update({
       current_round: gameState.current_round + 1,
@@ -79,15 +92,17 @@ export default function AdminPage() {
   }
 
   const settleRound = async () => {
-    if (!gameState) return
-    // 1. 獲取當前局的所有出價
+    if (!gameState || isSettlingRef.current) return
+    isSettlingRef.current = true // 上鎖，防止重複執行
+
+    // 1. 再次從 DB 確認最新出價 (防止 State 延遲)
     const { data: currentBids } = await supabase.from('ta_bids').select('*').eq('round_number', gameState.current_round)
+    
     if (!currentBids || currentBids.length === 0) {
       await supabase.from('ta_rooms').update({ game_status: 'revealed' }).eq('id', gameState.id)
       return
     }
 
-    // 2. 計算邏輯
     const validBids = currentBids.filter(b => !b.is_fold)
     let winnerId = null
     
@@ -97,13 +112,8 @@ export default function AdminPage() {
       if (winners.length === 1) winnerId = winners[0].player_id
     }
 
-    // 3. 執行更新 (扣時 + 加分)
-    // 注意：這裡簡單處理，實際生產建議用 Database Function 確保原子性
+    // 批量更新邏輯
     for (let bid of currentBids) {
-        // 即使 Fold (放棄) 的人，如果是因為手滑超過 5 秒但也按了 fold，這裡邏輯上是不扣分的
-        // 但根據你的規則：按住超過5秒就是有效出價，要扣分。
-        // 所以這裡我們只扣除 validBids 和 "雖然沒贏但也按了很久" 的人
-        // 簡單起見：只要 bid_seconds > 0 就扣 (由前端判定 fold)
         if (bid.bid_seconds > 0) {
              const p = players.find(x => x.id === bid.player_id)
              if (p) {
@@ -122,13 +132,27 @@ export default function AdminPage() {
     await supabase.from('ta_rooms').update({ game_status: 'revealed' }).eq('id', gameState.id)
   }
   
+  // [修改功能] 完全重置
   const resetGame = async () => {
-      if(!confirm("DANGER: Reset Game?")) return
-      // 重置所有數據
-      await supabase.from('ta_bids').delete().neq('bid_seconds', -1) // Delete all
-      await supabase.from('ta_players').update({ total_time_left: 600, tokens: 0, is_eliminated: false }).neq('tokens', -1)
+      if(!confirm("⚠️ DANGER: FULL RESET?\n這將會刪除所有玩家資料，無法復原！")) return
+      
+      // 1. 刪除 ta_players 表中的所有資料
+      // (因為 SQL 有設定 CASCADE，這會自動刪除 ta_bids 中相關的資料)
+      const { error } = await supabase.from('ta_players').delete().neq('id', '00000000-0000-0000-0000-000000000000') // 刪除所有 ID 不為空的人
+      
+      if (error) {
+        console.error(error)
+        alert("Reset Failed: " + error.message)
+        return
+      }
+
+      // 2. 重置房間狀態
       await supabase.from('ta_rooms').update({ current_round: 1, game_status: 'waiting' }).eq('id', gameState.id)
-      alert("Game Reset!")
+      
+      alert("Game Wiped. All players deleted.")
+      // 重新拉取一次數據
+      fetchPlayers()
+      setBids([])
   }
 
   // --- Render ---
@@ -151,8 +175,10 @@ export default function AdminPage() {
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-3xl font-bold">🕹️ Game Control</h1>
         <div className="space-x-4">
-             <button onClick={resetGame} className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 text-sm">Reset All</button>
-             <button onClick={() => supabase.auth.signOut().then(()=>setSession(null))} className="px-4 py-2 text-red-500 underline">Logout</button>
+             <button onClick={resetGame} className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 text-sm font-bold">
+               ☠️ FULL RESET (Delete All)
+             </button>
+             <button onClick={() => supabase.auth.signOut().then(()=>setSession(null))} className="px-4 py-2 text-gray-500 underline">Logout</button>
         </div>
       </div>
 
@@ -168,21 +194,31 @@ export default function AdminPage() {
                  <button onClick={nextRound} disabled={gameState.game_status === 'bidding'} className="p-4 bg-blue-600 text-white rounded font-bold hover:bg-blue-700 disabled:opacity-50">
                     1. Start Round
                  </button>
-                 <button onClick={settleRound} disabled={gameState.game_status === 'revealed'} className="p-4 bg-red-600 text-white rounded font-bold hover:bg-red-700 disabled:opacity-50">
-                    2. Settle & Reveal
+                 
+                 {/* 手動結算按鈕 (即使有自動結算，保留這個以防萬一) */}
+                 <button onClick={settleRound} disabled={gameState.game_status === 'revealed'} className="p-4 bg-gray-500 text-white rounded font-bold hover:bg-gray-600 disabled:opacity-50 text-sm">
+                    Manual Settle (Backup)
                  </button>
+
+                 <div className="mt-4 p-3 bg-yellow-50 text-xs text-yellow-800 rounded">
+                    <strong>Auto-Settle Active:</strong> Game will automatically reveal when all {players.length} players have submitted.
+                 </div>
               </div>
            </div>
 
            {/* 監控面板 */}
            <div className="md:col-span-2 bg-white rounded-xl shadow overflow-hidden">
+              <div className="p-4 bg-gray-100 font-bold flex justify-between">
+                  <span>Players ({players.length})</span>
+                  <span>Bids Received: {bids.filter(b => b.round_number === gameState.current_round).length} / {players.length}</span>
+              </div>
               <table className="w-full text-left">
-                <thead className="bg-gray-100">
+                <thead className="bg-gray-100 border-b">
                   <tr>
                     <th className="p-4">Player</th>
                     <th className="p-4">Time Left</th>
                     <th className="p-4">Tokens</th>
-                    <th className="p-4 bg-yellow-50">Current Bid ({gameState.current_round})</th>
+                    <th className="p-4 bg-yellow-50">Current Bid</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y">
@@ -198,7 +234,7 @@ export default function AdminPage() {
                         <td className="p-4 bg-yellow-50 font-mono">
                            {bid ? (
                                bid.is_fold ? <span className="text-gray-400 text-sm">FOLD ({bid.bid_seconds}s)</span> : <span className="text-blue-600 font-bold">{bid.bid_seconds}s</span>
-                           ) : <span className="text-gray-300">-</span>}
+                           ) : <span className="text-red-300 animate-pulse text-xs">Waiting...</span>}
                         </td>
                       </tr>
                     )
