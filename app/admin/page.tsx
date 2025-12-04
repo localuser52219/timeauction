@@ -13,6 +13,10 @@ export default function AdminPage() {
   const [bids, setBids] = useState<any[]>([])
   const [gameState, setGameState] = useState<any>(null)
 
+  // [新增] 設定選項 State
+  const [configTime, setConfigTime] = useState<number>(600)
+  const [configRounds, setConfigRounds] = useState<number>(19)
+
   // 防止重複結算的鎖
   const isSettlingRef = useRef(false)
 
@@ -23,20 +27,26 @@ export default function AdminPage() {
     })
   }, [])
 
-  // [新增功能] 自動結算監聽器
-  // 當 Bids 變動或 Players 變動時，檢查是否所有人已出價
+  // 自動結算監聽器
   useEffect(() => {
     if (!gameState || gameState.game_status !== 'bidding' || players.length === 0) return
 
-    // 找出本局的有效出價 (包含 Fold 的)
     const currentRoundBids = bids.filter(b => b.round_number === gameState.current_round)
     
-    // 如果「出價數」等於「玩家總數」，且目前沒有正在結算
     if (currentRoundBids.length === players.length && !isSettlingRef.current) {
         console.log("All players have bid. Auto settling...")
         settleRound()
     }
-  }, [bids, players, gameState]) // 監聽這些變數
+  }, [bids, players, gameState])
+
+  // 當從 DB 載入房間設定時，同步更新 UI 選項
+  useEffect(() => {
+    if (gameState) {
+      if (gameState.settings_initial_time) setConfigTime(gameState.settings_initial_time)
+      if (gameState.settings_total_rounds) setConfigRounds(gameState.settings_total_rounds)
+    }
+  }, [gameState?.settings_initial_time, gameState?.settings_total_rounds])
+
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -83,7 +93,14 @@ export default function AdminPage() {
 
   const nextRound = async () => {
     if (!gameState) return
-    isSettlingRef.current = false // 解鎖
+    
+    // [新增] 檢查是否超過總回合數
+    if (gameState.current_round >= gameState.settings_total_rounds) {
+        alert("Game Over! Max rounds reached.")
+        return
+    }
+
+    isSettlingRef.current = false
     setBids([]) 
     await supabase.from('ta_rooms').update({
       current_round: gameState.current_round + 1,
@@ -93,9 +110,8 @@ export default function AdminPage() {
 
   const settleRound = async () => {
     if (!gameState || isSettlingRef.current) return
-    isSettlingRef.current = true // 上鎖，防止重複執行
+    isSettlingRef.current = true
 
-    // 1. 再次從 DB 確認最新出價 (防止 State 延遲)
     const { data: currentBids } = await supabase.from('ta_bids').select('*').eq('round_number', gameState.current_round)
     
     if (!currentBids || currentBids.length === 0) {
@@ -112,7 +128,6 @@ export default function AdminPage() {
       if (winners.length === 1) winnerId = winners[0].player_id
     }
 
-    // 批量更新邏輯
     for (let bid of currentBids) {
         if (bid.bid_seconds > 0) {
              const p = players.find(x => x.id === bid.player_id)
@@ -132,13 +147,12 @@ export default function AdminPage() {
     await supabase.from('ta_rooms').update({ game_status: 'revealed' }).eq('id', gameState.id)
   }
   
-  // [修改功能] 完全重置
+  // [修改] 支援設定的重置功能
   const resetGame = async () => {
-      if(!confirm("⚠️ DANGER: FULL RESET?\n這將會刪除所有玩家資料，無法復原！")) return
+      const confirmMsg = `⚠️ DANGER: FULL RESET? \n\n將套用新設定：\n時間: ${configTime}s\n回合: ${configRounds}\n\n這將刪除所有玩家！`
+      if(!confirm(confirmMsg)) return
       
-      // 1. 刪除 ta_players 表中的所有資料
-      // (因為 SQL 有設定 CASCADE，這會自動刪除 ta_bids 中相關的資料)
-      const { error } = await supabase.from('ta_players').delete().neq('id', '00000000-0000-0000-0000-000000000000') // 刪除所有 ID 不為空的人
+      const { error } = await supabase.from('ta_players').delete().neq('id', '00000000-0000-0000-0000-000000000000')
       
       if (error) {
         console.error(error)
@@ -146,11 +160,15 @@ export default function AdminPage() {
         return
       }
 
-      // 2. 重置房間狀態
-      await supabase.from('ta_rooms').update({ current_round: 1, game_status: 'waiting' }).eq('id', gameState.id)
+      // [新增] 更新房間設定
+      await supabase.from('ta_rooms').update({ 
+          current_round: 1, 
+          game_status: 'waiting',
+          settings_initial_time: configTime,
+          settings_total_rounds: configRounds
+      }).eq('id', gameState.id)
       
-      alert("Game Wiped. All players deleted.")
-      // 重新拉取一次數據
+      alert("Game Reset & Settings Applied!")
       fetchPlayers()
       setBids([])
   }
@@ -175,11 +193,52 @@ export default function AdminPage() {
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-3xl font-bold">🕹️ Game Control</h1>
         <div className="space-x-4">
-             <button onClick={resetGame} className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 text-sm font-bold">
-               ☠️ FULL RESET (Delete All)
-             </button>
              <button onClick={() => supabase.auth.signOut().then(()=>setSession(null))} className="px-4 py-2 text-gray-500 underline">Logout</button>
         </div>
+      </div>
+
+      {/* [新增] 遊戲設定區塊 */}
+      <div className="bg-white p-6 rounded-xl shadow border-2 border-purple-100 mb-8">
+          <h3 className="text-lg font-bold mb-4 text-purple-900">⚙️ Game Configuration (Apply on Reset)</h3>
+          <div className="flex flex-wrap gap-8 items-end">
+              
+              {/* 時間設定 */}
+              <div>
+                  <label className="block text-sm font-bold text-gray-500 mb-2">Total Time (Seconds)</label>
+                  <div className="flex gap-2">
+                      {[60, 180, 600].map(t => (
+                          <button 
+                              key={t}
+                              onClick={() => setConfigTime(t)}
+                              className={`px-4 py-2 rounded border ${configTime === t ? 'bg-purple-600 text-white border-purple-600' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'}`}
+                          >
+                              {t}s
+                          </button>
+                      ))}
+                  </div>
+              </div>
+
+              {/* 回合設定 */}
+              <div>
+                  <label className="block text-sm font-bold text-gray-500 mb-2">Total Rounds</label>
+                  <div className="flex gap-2">
+                      {[3, 10, 19].map(r => (
+                          <button 
+                              key={r}
+                              onClick={() => setConfigRounds(r)}
+                              className={`px-4 py-2 rounded border ${configRounds === r ? 'bg-purple-600 text-white border-purple-600' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'}`}
+                          >
+                              {r} Rounds
+                          </button>
+                      ))}
+                  </div>
+              </div>
+
+              {/* 重置按鈕 */}
+              <button onClick={resetGame} className="px-6 py-3 bg-red-600 text-white rounded font-bold hover:bg-red-700 shadow-lg ml-auto">
+                 ⚠️ APPLY & FULL RESET
+              </button>
+          </div>
       </div>
 
       {gameState && (
@@ -188,21 +247,17 @@ export default function AdminPage() {
            <div className="md:col-span-1 bg-white p-6 rounded-xl shadow border-2 border-blue-100">
               <div className="text-sm text-gray-500 uppercase">Current Status</div>
               <div className="text-4xl font-bold mb-4">{gameState.game_status}</div>
-              <div className="text-xl mb-6">Round: <span className="font-mono font-bold text-blue-600">{gameState.current_round}</span> / 19</div>
+              {/* [修改] 顯示動態總回合數 */}
+              <div className="text-xl mb-6">Round: <span className="font-mono font-bold text-blue-600">{gameState.current_round}</span> / {gameState.settings_total_rounds || 19}</div>
               
               <div className="flex flex-col gap-3">
                  <button onClick={nextRound} disabled={gameState.game_status === 'bidding'} className="p-4 bg-blue-600 text-white rounded font-bold hover:bg-blue-700 disabled:opacity-50">
                     1. Start Round
                  </button>
                  
-                 {/* 手動結算按鈕 (即使有自動結算，保留這個以防萬一) */}
                  <button onClick={settleRound} disabled={gameState.game_status === 'revealed'} className="p-4 bg-gray-500 text-white rounded font-bold hover:bg-gray-600 disabled:opacity-50 text-sm">
-                    Manual Settle (Backup)
+                    Manual Settle
                  </button>
-
-                 <div className="mt-4 p-3 bg-yellow-50 text-xs text-yellow-800 rounded">
-                    <strong>Auto-Settle Active:</strong> Game will automatically reveal when all {players.length} players have submitted.
-                 </div>
               </div>
            </div>
 
