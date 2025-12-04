@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { supabase } from '@/utils/supabase'
 
 export default function AdminPage() {
@@ -8,17 +8,14 @@ export default function AdminPage() {
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
 
-  // 遊戲資料 State
+  // 遊戲資料
   const [players, setPlayers] = useState<any[]>([])
   const [bids, setBids] = useState<any[]>([])
   const [gameState, setGameState] = useState<any>(null)
 
-  // [新增] 設定選項 State
+  // 設定選項
   const [configTime, setConfigTime] = useState<number>(600)
   const [configRounds, setConfigRounds] = useState<number>(19)
-
-  // 防止重複結算的鎖
-  const isSettlingRef = useRef(false)
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -27,14 +24,13 @@ export default function AdminPage() {
     })
   }, [])
 
-  // 當從 DB 載入房間設定時，同步更新 UI 選項
+  // 同步 DB 設定到 UI
   useEffect(() => {
     if (gameState) {
       if (gameState.settings_initial_time) setConfigTime(gameState.settings_initial_time)
       if (gameState.settings_total_rounds) setConfigRounds(gameState.settings_total_rounds)
     }
   }, [gameState?.settings_initial_time, gameState?.settings_total_rounds])
-
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -57,7 +53,7 @@ export default function AdminPage() {
     supabase.channel('admin_all')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_players' }, fetchPlayers)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_bids' }, fetchBids)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_rooms' }, (payload) => setGameState(payload.new))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'ta_rooms' }, (payload: any) => setGameState(payload.new))
       .subscribe()
   }
 
@@ -81,14 +77,10 @@ export default function AdminPage() {
 
   const nextRound = async () => {
     if (!gameState) return
-    
-    // [新增] 檢查是否超過總回合數
-    if (gameState.current_round >= gameState.settings_total_rounds) {
+    if (gameState.current_round >= (gameState.settings_total_rounds || 19)) {
         alert("Game Over! Max rounds reached.")
         return
     }
-
-    isSettlingRef.current = false
     setBids([]) 
     await supabase.from('ta_rooms').update({
       current_round: gameState.current_round + 1,
@@ -97,58 +89,29 @@ export default function AdminPage() {
   }
 
   const settleRound = async () => {
-    if (!gameState || isSettlingRef.current) return
-    isSettlingRef.current = true
-
+    if (!gameState) return
     const { data: currentBids } = await supabase.from('ta_bids').select('*').eq('round_number', gameState.current_round)
-    
     if (!currentBids || currentBids.length === 0) {
       await supabase.from('ta_rooms').update({ game_status: 'revealed' }).eq('id', gameState.id)
       return
     }
-
-    const validBids = currentBids.filter(b => !b.is_fold)
-    let winnerId = null
-    
-    if (validBids.length > 0) {
-      const maxTime = Math.max(...validBids.map(b => b.bid_seconds))
-      const winners = validBids.filter(b => b.bid_seconds === maxTime)
-      if (winners.length === 1) winnerId = winners[0].player_id
-    }
-
-    for (let bid of currentBids) {
-        if (bid.bid_seconds > 0) {
-             const p = players.find(x => x.id === bid.player_id)
-             if (p) {
-                 await supabase.from('ta_players').update({ 
-                     total_time_left: p.total_time_left - bid.bid_seconds 
-                 }).eq('id', p.id)
-             }
-        }
-    }
-
-    if (winnerId) {
-        const w = players.find(x => x.id === winnerId)
-        if(w) await supabase.from('ta_players').update({ tokens: w.tokens + 1 }).eq('id', winnerId)
-    }
-
+    // 手動結算僅更新狀態，主要依賴 DB Trigger
     await supabase.from('ta_rooms').update({ game_status: 'revealed' }).eq('id', gameState.id)
   }
   
-  // [修改] 支援設定的重置功能
   const resetGame = async () => {
-      const confirmMsg = `⚠️ DANGER: FULL RESET? \n\n將套用新設定：\n時間: ${configTime}s\n回合: ${configRounds}\n\n這將刪除所有玩家！`
+      const confirmMsg = `⚠️ DANGER: FULL RESET? \n\n設定將變更為：\n時間: ${configTime}s\n回合: ${configRounds}\n\n這將【刪除所有玩家】，請確認沒有其他人在玩！`
       if(!confirm(confirmMsg)) return
       
+      // 嘗試刪除所有玩家
       const { error } = await supabase.from('ta_players').delete().neq('id', '00000000-0000-0000-0000-000000000000')
       
       if (error) {
-        console.error(error)
-        alert("Reset Failed: " + error.message)
+        console.error("Delete Error:", error)
+        alert("Reset Failed (Permission Error). 請檢查 SQL RLS Policy 是否允許 DELETE。\n錯誤訊息: " + error.message)
         return
       }
 
-      // [新增] 更新房間設定
       await supabase.from('ta_rooms').update({ 
           current_round: 1, 
           game_status: 'waiting',
@@ -156,74 +119,54 @@ export default function AdminPage() {
           settings_total_rounds: configRounds
       }).eq('id', gameState.id)
       
-      alert("Game Reset & Settings Applied!")
+      alert("System Reset Successful. All players cleared.")
       fetchPlayers()
       setBids([])
   }
 
-  // --- Render ---
-
   if (!session) {
     return (
-      <div className="flex items-center justify-center h-screen bg-gray-100">
-        <form onSubmit={handleLogin} className="p-8 bg-white rounded shadow-md w-96">
-          <h2 className="text-2xl mb-4 font-bold">Admin Login</h2>
-          <input className="w-full p-2 border mb-4" type="email" placeholder="Email" value={email} onChange={e=>setEmail(e.target.value)} />
-          <input className="w-full p-2 border mb-4" type="password" placeholder="Password" value={password} onChange={e=>setPassword(e.target.value)} />
-          <button disabled={loading} className="w-full bg-black text-white p-2 rounded">{loading ? 'Loading...' : 'Login'}</button>
+      <div className="flex items-center justify-center h-screen bg-gray-200">
+        <form onSubmit={handleLogin} className="p-8 bg-white rounded-xl shadow-xl w-96 border border-gray-300">
+          <h2 className="text-3xl mb-6 font-bold text-black text-center">Admin Login</h2>
+          <input className="w-full p-3 border border-gray-400 rounded mb-4 text-black text-lg" type="email" placeholder="Email" value={email} onChange={e=>setEmail(e.target.value)} />
+          <input className="w-full p-3 border border-gray-400 rounded mb-6 text-black text-lg" type="password" placeholder="Password" value={password} onChange={e=>setPassword(e.target.value)} />
+          <button disabled={loading} className="w-full bg-black text-white p-3 rounded font-bold hover:bg-gray-800 transition">{loading ? 'Loading...' : 'LOGIN'}</button>
         </form>
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-8">
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-3xl font-bold">🕹️ Game Control</h1>
-        <div className="space-x-4">
-             <button onClick={() => supabase.auth.signOut().then(()=>setSession(null))} className="px-4 py-2 text-gray-500 underline">Logout</button>
-        </div>
+    <div className="min-h-screen bg-gray-100 p-8 text-black">
+      <div className="flex justify-between items-center mb-8 bg-white p-4 rounded-xl shadow-sm border border-gray-200">
+        <h1 className="text-4xl font-black tracking-tight text-black">🕹️ ADMIN CONTROL</h1>
+        <button onClick={() => supabase.auth.signOut().then(()=>setSession(null))} className="px-6 py-2 bg-gray-200 hover:bg-gray-300 text-black font-bold rounded">Logout</button>
       </div>
 
-      {/* [新增] 遊戲設定區塊 */}
-      <div className="bg-white p-6 rounded-xl shadow border-2 border-purple-100 mb-8">
-          <h3 className="text-lg font-bold mb-4 text-purple-900">⚙️ Game Configuration (Apply on Reset)</h3>
+      {/* 設定區塊 */}
+      <div className="bg-white p-6 rounded-xl shadow-md border-2 border-purple-200 mb-8">
+          <h3 className="text-xl font-bold mb-4 text-purple-800 flex items-center gap-2">
+            ⚙️ Game Settings <span className="text-sm font-normal text-gray-600">(Applied on Reset)</span>
+          </h3>
           <div className="flex flex-wrap gap-8 items-end">
-              
-              {/* 時間設定 */}
               <div>
-                  <label className="block text-sm font-bold text-gray-500 mb-2">Total Time (Seconds)</label>
+                  <label className="block text-sm font-bold text-gray-700 mb-2 uppercase tracking-wider">Total Time</label>
                   <div className="flex gap-2">
                       {[60, 180, 600].map(t => (
-                          <button 
-                              key={t}
-                              onClick={() => setConfigTime(t)}
-                              className={`px-4 py-2 rounded border ${configTime === t ? 'bg-purple-600 text-white border-purple-600' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'}`}
-                          >
-                              {t}s
-                          </button>
+                          <button key={t} onClick={() => setConfigTime(t)} className={`px-4 py-2 rounded font-bold border-2 ${configTime === t ? 'bg-purple-600 text-white border-purple-600' : 'bg-gray-50 text-gray-600 border-gray-200 hover:border-gray-400'}`}>{t}s</button>
                       ))}
                   </div>
               </div>
-
-              {/* 回合設定 */}
               <div>
-                  <label className="block text-sm font-bold text-gray-500 mb-2">Total Rounds</label>
+                  <label className="block text-sm font-bold text-gray-700 mb-2 uppercase tracking-wider">Total Rounds</label>
                   <div className="flex gap-2">
                       {[3, 10, 19].map(r => (
-                          <button 
-                              key={r}
-                              onClick={() => setConfigRounds(r)}
-                              className={`px-4 py-2 rounded border ${configRounds === r ? 'bg-purple-600 text-white border-purple-600' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'}`}
-                          >
-                              {r} Rounds
-                          </button>
+                          <button key={r} onClick={() => setConfigRounds(r)} className={`px-4 py-2 rounded font-bold border-2 ${configRounds === r ? 'bg-purple-600 text-white border-purple-600' : 'bg-gray-50 text-gray-600 border-gray-200 hover:border-gray-400'}`}>{r} R</button>
                       ))}
                   </div>
               </div>
-
-              {/* 重置按鈕 */}
-              <button onClick={resetGame} className="px-6 py-3 bg-red-600 text-white rounded font-bold hover:bg-red-700 shadow-lg ml-auto">
+              <button onClick={resetGame} className="px-6 py-3 bg-red-600 text-white rounded font-bold hover:bg-red-700 shadow-lg ml-auto border-2 border-red-800">
                  ⚠️ APPLY & FULL RESET
               </button>
           </div>
@@ -231,53 +174,75 @@ export default function AdminPage() {
 
       {gameState && (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-           {/* 控制面板 */}
-           <div className="md:col-span-1 bg-white p-6 rounded-xl shadow border-2 border-blue-100">
-              <div className="text-sm text-gray-500 uppercase">Current Status</div>
-              <div className="text-4xl font-bold mb-4">{gameState.game_status}</div>
-              {/* [修改] 顯示動態總回合數 */}
-              <div className="text-xl mb-6">Round: <span className="font-mono font-bold text-blue-600">{gameState.current_round}</span> / {gameState.settings_total_rounds || 19}</div>
+           {/* 左側：控制台 */}
+           <div className="md:col-span-1 bg-white p-6 rounded-xl shadow-md border-2 border-blue-200 h-fit">
+              <div className="text-xs text-gray-500 uppercase font-bold tracking-widest mb-1">Status</div>
+              <div className={`text-4xl font-black mb-4 uppercase ${gameState.game_status === 'bidding' ? 'text-green-600' : 'text-red-600'}`}>
+                {gameState.game_status}
+              </div>
               
+              <div className="text-xl mb-6 font-bold text-gray-800 border-b pb-4">
+                Round: <span className="text-blue-600 text-3xl mx-2">{gameState.current_round}</span> / {gameState.settings_total_rounds || 19}
+              </div>
+
               <div className="flex flex-col gap-3">
-                 <button onClick={nextRound} disabled={gameState.game_status === 'bidding'} className="p-4 bg-blue-600 text-white rounded font-bold hover:bg-blue-700 disabled:opacity-50">
-                    1. Start Round
+                 <button onClick={nextRound} disabled={gameState.game_status === 'bidding'} 
+                    className="p-4 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-md transition-all">
+                    ▶ START NEXT ROUND
                  </button>
-                 
-                 <button onClick={settleRound} disabled={gameState.game_status === 'revealed'} className="p-4 bg-gray-500 text-white rounded font-bold hover:bg-gray-600 disabled:opacity-50 text-sm">
-                    Manual Settle
+                 <button onClick={settleRound} disabled={gameState.game_status === 'revealed'} 
+                    className="p-4 bg-gray-800 text-white rounded-lg font-bold hover:bg-gray-900 disabled:opacity-50 disabled:cursor-not-allowed shadow-md transition-all text-sm">
+                    ⚡ FORCE SETTLE (Emergency)
                  </button>
+              </div>
+              
+              <div className="mt-6 p-4 bg-gray-100 rounded text-xs text-gray-600 leading-relaxed">
+                <strong>Auto-Settle:</strong> System will automatically reveal results when <strong>ALL</strong> players have submitted their bids.
               </div>
            </div>
 
-           {/* 監控面板 */}
-           <div className="md:col-span-2 bg-white rounded-xl shadow overflow-hidden">
-              <div className="p-4 bg-gray-100 font-bold flex justify-between">
-                  <span>Players ({players.length})</span>
-                  <span>Bids Received: {bids.filter(b => b.round_number === gameState.current_round).length} / {players.length}</span>
+           {/* 右側：玩家監控 */}
+           <div className="md:col-span-2 bg-white rounded-xl shadow-md border border-gray-200 overflow-hidden">
+              <div className="p-4 bg-gray-100 border-b border-gray-200 flex justify-between items-center">
+                  <span className="font-bold text-lg text-black">PLAYERS ({players.length})</span>
+                  <span className="px-3 py-1 bg-blue-100 text-blue-800 rounded-full font-bold text-sm">
+                    Bids Received: {bids.filter(b => b.round_number === gameState.current_round).length} / {players.length}
+                  </span>
               </div>
               <table className="w-full text-left">
-                <thead className="bg-gray-100 border-b">
+                <thead className="bg-gray-50 border-b border-gray-200">
                   <tr>
-                    <th className="p-4">Player</th>
-                    <th className="p-4">Time Left</th>
-                    <th className="p-4">Tokens</th>
-                    <th className="p-4 bg-yellow-50">Current Bid</th>
+                    <th className="p-4 text-gray-600 font-bold uppercase text-xs tracking-wider">Name</th>
+                    <th className="p-4 text-gray-600 font-bold uppercase text-xs tracking-wider">Time Left</th>
+                    <th className="p-4 text-gray-600 font-bold uppercase text-xs tracking-wider">Tokens</th>
+                    <th className="p-4 bg-yellow-50 text-yellow-800 font-bold uppercase text-xs tracking-wider">Current Bid Status</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y">
+                <tbody className="divide-y divide-gray-100">
                   {players.map(p => {
                     const bid = bids.find(b => b.player_id === p.id && b.round_number === gameState.current_round)
+                    
+                    // [優化] 狀態顯示邏輯
+                    let statusBadge;
+                    if (bid) {
+                        if (bid.is_fold) {
+                            statusBadge = <span className="inline-block px-3 py-1 bg-red-100 text-red-800 rounded font-bold text-sm">🛑 FOLD ({bid.bid_seconds}s)</span>
+                        } else {
+                            statusBadge = <span className="inline-block px-3 py-1 bg-green-100 text-green-800 rounded font-bold text-sm">✅ BID: {bid.bid_seconds}s</span>
+                        }
+                    } else {
+                        statusBadge = <span className="inline-block px-3 py-1 bg-gray-100 text-gray-400 rounded font-medium text-sm animate-pulse">⏳ WAITING...</span>
+                    }
+
                     return (
-                      <tr key={p.id}>
-                        <td className="p-4 font-medium">{p.name}</td>
-                        <td className="p-4 font-mono">{p.total_time_left.toFixed(2)}s</td>
-                        <td className="p-4">
-                           {[...Array(p.tokens)].map((_,i)=><span key={i}>★</span>)}
+                      <tr key={p.id} className="hover:bg-gray-50 transition-colors">
+                        <td className="p-4 font-bold text-gray-900">{p.name}</td>
+                        <td className="p-4 font-mono font-bold text-blue-600 text-lg">{p.total_time_left.toFixed(2)}s</td>
+                        <td className="p-4 text-yellow-600 font-bold">
+                           {p.tokens} ★
                         </td>
-                        <td className="p-4 bg-yellow-50 font-mono">
-                           {bid ? (
-                               bid.is_fold ? <span className="text-gray-400 text-sm">FOLD ({bid.bid_seconds}s)</span> : <span className="text-blue-600 font-bold">{bid.bid_seconds}s</span>
-                           ) : <span className="text-red-300 animate-pulse text-xs">Waiting...</span>}
+                        <td className="p-4 bg-yellow-50/50">
+                           {statusBadge}
                         </td>
                       </tr>
                     )
