@@ -75,15 +75,15 @@ export default function AdminPage() {
     setBids(data || [])
   }
 
-  // [關鍵修正 1] 回合推進邏輯
+  // 回合推進邏輯
   const nextRound = async () => {
     if (!gameState) return
     
-    // 如果是 waiting (剛重置完)，我們應該開始第 1 局，而不是跳到第 2 局
     const isFirstStart = gameState.game_status === 'waiting'
     const nextRoundNum = isFirstStart ? gameState.current_round : gameState.current_round + 1
+    const maxRounds = gameState.settings_total_rounds || 19
 
-    if (nextRoundNum > (gameState.settings_total_rounds || 19)) {
+    if (nextRoundNum > maxRounds) {
         alert("Game Over! Max rounds reached.")
         return
     }
@@ -95,24 +95,30 @@ export default function AdminPage() {
     }).eq('id', gameState.id)
   }
 
+  // [新增] 結束遊戲並顯示總分
+  const endGame = async () => {
+      if (!confirm("Confirm FINISH GAME? \n這將會在公眾螢幕顯示最終排行榜 (Final Leaderboard)")) return
+      
+      await supabase.from('ta_rooms').update({
+          game_status: 'ended'
+      }).eq('id', gameState.id)
+  }
+
   const settleRound = async () => {
     if (!gameState) return
-    const { data: currentBids } = await supabase.from('ta_bids').select('*').eq('round_number', gameState.current_round)
-    // 即使沒有出價也允許強制結算，方便測試
     await supabase.from('ta_rooms').update({ game_status: 'revealed' }).eq('id', gameState.id)
   }
   
-  // [關鍵修正 2] 完整重置邏輯 (清除幽靈玩家)
+  // 完整重置邏輯
   const resetGame = async () => {
       const confirmMsg = `⚠️ DANGER: FULL RESET? \n\n設定將變更為：\n時間: ${configTime}s\n回合: ${configRounds}\n\n這將【刪除所有玩家】，請確認沒有其他人在玩！`
       if(!confirm(confirmMsg)) return
       
-      // 嘗試刪除所有玩家 (需要 SQL RLS 支援)
       const { error } = await supabase.from('ta_players').delete().neq('id', '00000000-0000-0000-0000-000000000000')
       
       if (error) {
         console.error("Delete Error:", error)
-        alert("Reset Failed (Permission Error). 請檢查 SQL RLS Policy 是否允許 DELETE。\n錯誤訊息: " + error.message)
+        alert("Reset Failed: " + error.message)
         return
       }
 
@@ -123,7 +129,7 @@ export default function AdminPage() {
           settings_total_rounds: configRounds
       }).eq('id', gameState.id)
       
-      alert("System Reset Successful. All players cleared.")
+      alert("System Reset Successful.")
       fetchPlayers()
       setBids([])
   }
@@ -140,6 +146,9 @@ export default function AdminPage() {
       </div>
     )
   }
+
+  // 判斷是否為最後一回合
+  const isLastRound = gameState ? gameState.current_round >= (gameState.settings_total_rounds || 19) : false
 
   return (
     <div className="min-h-screen bg-gray-100 p-8 text-black">
@@ -181,7 +190,7 @@ export default function AdminPage() {
            {/* 左側：控制台 */}
            <div className="md:col-span-1 bg-white p-6 rounded-xl shadow-md border-2 border-blue-200 h-fit">
               <div className="text-xs text-gray-500 uppercase font-bold tracking-widest mb-1">Status</div>
-              <div className={`text-4xl font-black mb-4 uppercase ${gameState.game_status === 'bidding' ? 'text-green-600' : 'text-red-600'}`}>
+              <div className={`text-4xl font-black mb-4 uppercase ${gameState.game_status === 'bidding' ? 'text-green-600' : (gameState.game_status === 'ended' ? 'text-purple-600' : 'text-red-600')}`}>
                 {gameState.game_status}
               </div>
               
@@ -190,18 +199,23 @@ export default function AdminPage() {
               </div>
 
               <div className="flex flex-col gap-3">
-                 <button onClick={nextRound} disabled={gameState.game_status === 'bidding'} 
-                    className="p-4 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-md transition-all">
-                    ▶ START ROUND {gameState.game_status === 'waiting' ? 1 : gameState.current_round + 1}
-                 </button>
-                 <button onClick={settleRound} disabled={gameState.game_status === 'revealed'} 
+                 {/* [修改] 按鈕邏輯：如果是最後一回合且已揭曉，顯示結束按鈕 */}
+                 {isLastRound && gameState.game_status === 'revealed' ? (
+                     <button onClick={endGame} 
+                        className="p-4 bg-yellow-500 text-black rounded-lg font-black hover:bg-yellow-400 shadow-[0_0_20px_rgba(234,179,8,0.5)] transition-all animate-pulse text-xl">
+                        🏆 FINISH GAME & SHOW RESULTS
+                     </button>
+                 ) : (
+                     <button onClick={nextRound} disabled={gameState.game_status === 'bidding' || gameState.game_status === 'ended'} 
+                        className="p-4 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-md transition-all">
+                        ▶ START ROUND {gameState.game_status === 'waiting' ? 1 : gameState.current_round + 1}
+                     </button>
+                 )}
+
+                 <button onClick={settleRound} disabled={gameState.game_status === 'revealed' || gameState.game_status === 'ended'} 
                     className="p-4 bg-gray-800 text-white rounded-lg font-bold hover:bg-gray-900 disabled:opacity-50 disabled:cursor-not-allowed shadow-md transition-all text-sm">
                     ⚡ FORCE SETTLE (Emergency)
                  </button>
-              </div>
-              
-              <div className="mt-6 p-4 bg-gray-100 rounded text-xs text-gray-600 leading-relaxed">
-                <strong>Auto-Settle:</strong> System will automatically reveal results when <strong>ALL</strong> players have submitted their bids.
               </div>
            </div>
 
